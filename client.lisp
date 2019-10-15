@@ -1,19 +1,25 @@
 (in-package :imap4)
 
 (declaim (optimize (debug 3) (speed 0)))
-(defvar *input-stream*)
+
+(defvar *user*)
+(defvar *password*)
 
 (defclass imap-context ()
   ((tag :initform 0 :accessor imap-tag)
    (pending-cmd :initform nil :accessor imap-pending-cmd)
    (data :initform nil :accessor imap-data)
    (buffer :initform nil :initarg :buffer :accessor imap-buffer)
-   (handler :initform nil :initarg :handler :accessor imap-handler)))
+   (handler :initform nil :initarg :handler :accessor imap-handler)
+   (user :initform nil :initarg :user :accessor imap-user)
+   (password :initform nil :initarg :password :accessor imap-password)))
 
-(defun make-imap-context (handler)
+(defun make-imap-context (handler user password)
   (make-instance 'imap-context
 		 :handler handler
-		 :buffer (alien-ring:make-binary-ring-stream 65536)))
+		 :buffer (alien-ring:make-binary-ring-stream 65536)
+		 :user user
+		 :password password))
 
 (defun imap-cmd-pending-p (ctx)
   (not (null (imap-pending-cmd ctx))))
@@ -38,23 +44,26 @@
        then (read-line (imap-buffer ctx) nil nil)
        while line
        do
-	 ;(format t "line=~a~%" line)
-	 ;(format t "stream data size: ~a~%" (alien-ring:stream-size stream))
 	 (cond
 	   ((imap-cmd-pending-p ctx)
 	    (setf (imap-data ctx) (concatenate 'string (imap-data ctx) line))
 	    (let ((pending-tag (tag->str (imap-tag ctx))))
-	      (when (string= (subseq line 0 (length pending-tag)) pending-tag)	    
+	      (when (string= (subseq line 0 (length pending-tag)) pending-tag)
 		(when handler
-		  (funcall handler tls (imap-data ctx))))))
+		  (funcall handler tls (imap-data ctx)))
+		(setf (imap-data ctx) nil))))
 	   (t
 	    (when handler
 	      (funcall handler tls line)))))))
 
 (defun connect (host port user password)
-  (let ((auth-data (base64-encode (make-sasl-plain user password))))
+  (let ((*user* user)
+	(*password* password))
     (client-connect host port
-		    #'imap-connected
+		    (lambda (tls)
+		      (let ((*user* user)
+			    (*password* password))
+			(imap-connected tls)))
 		    #'read-imap-data)))
 
 (defun add-crlf (str)
@@ -71,12 +80,12 @@
    (concatenate 'string (make-tag tag) '(#\space) cmd)))
 
 (defun imap-connected (tls)
-  (setf (tls::data tls) (make-imap-context #'read-imap-greeting)))
+  (setf (tls::data tls)
+	(make-imap-context #'read-imap-greeting *user* *password*)))
 
 (defun read-imap-greeting (tls txt)
   (let ((ctx (tls::data tls))
 	(greeting (parse 'greeting txt)))
-    (format t "greeting=~a~%" greeting)
     ;; proceed to send CAPABILITY command
     (imap-cmd-capability tls)))
 
@@ -90,4 +99,25 @@
 (defun read-capabilities (tls data)
   (let* ((ctx (tls::data tls))
 	 (caps (parse 'response data)))
-    (format t "capabilities=~a~%" caps)))
+    (let ((data (cadadr (assoc 'data caps))))
+      (format t "data: ~a~%" data)
+      (imap-authenticate tls))))
+
+(defun imap-authenticate (tls)
+  (let* ((ctx (tls::data tls))
+	 (user (imap-user ctx))
+	 (pass (imap-password ctx))
+	 (auth-data (base64-encode (make-sasl-plain user pass))))
+    (imap-authenticate-cmd tls user pass)))
+
+(defun imap-authenticate-cmd (tls user pass)
+  (let* ((ctx (tls::data tls))
+	 (tag (incf (imap-tag ctx)))
+	 (user (imap-user ctx))
+	 (pass (imap-password ctx))
+	 (auth-data (base64-encode (make-sasl-plain user pass))))
+    (tls-write tls (make-cmd tag (concatenate 'string "AUTHENTICATE PLAIN " auth-data)))
+    (setf (imap-handler ctx) #'imap-read-auth)))
+
+(defun imap-read-auth (tls data)
+  (format t "auth response handler: ~a~%" data))

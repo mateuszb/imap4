@@ -14,12 +14,14 @@
    (user :initform nil :initarg :user :accessor imap-user)
    (password :initform nil :initarg :password :accessor imap-password)
    (separator :initform nil :initarg :separator :accessor imap-hierarchy-separator)
-   (mailboxes :initform nil :initarg :mailboxes :accessor imap-mailboxes)))
+   (mailboxes :initform nil :initarg :mailboxes :accessor imap-mailboxes)
+   (selected-mailbox :initform nil :initarg :selected-mbox :accessor imap-selected-mbox)))
 
 (defclass mailbox ()
   ((name :initform nil :accessor mailbox-name :initarg :name)
    (flags :initform nil :accessor mailbox-flags :initarg :flags)
-   (reference :initform nil :accessor mailbox-reference :initarg :reference)))
+   (reference :initform nil :accessor mailbox-reference :initarg :reference)
+   (message-count :initform 0 :accessor mailbox-message-count :initarg :num-messages)))
 
 (defmethod print-object ((m mailbox) stream)
   (print-unreadable-object (m stream :type t)
@@ -155,7 +157,7 @@
 (defun imap-read-hierarchy-delimeter (tls data)
   (let* ((parsed (parse 'response data)))
     (when parsed
-      (let* ((lst (cadaar parsed))
+      (let* ((lst (caar parsed))
 	     (len (length lst))
 	     (sep (nth (- len 2) lst)))
 	(with-imap-context (tls ctx)
@@ -176,7 +178,7 @@
       (setf (imap-handler ctx) #'imap-read-inbox-list))))
 
 (defun get-mailboxes (parsed-response)
-  (let ((mailboxes (mapcar #'cdadr (car parsed-response))))
+  (let ((mailboxes (mapcar #'cdr (car parsed-response))))
     (loop for m in mailboxes
        collect
 	 (destructuring-bind (flags reference name) m
@@ -184,7 +186,38 @@
 
 (defun imap-read-inbox-list (tls data)
   (with-imap-context (tls ctx)
+    (format t "data=~s~%" data)
     (let* ((parsed (parse 'response data)))
       (let ((mailboxes (get-mailboxes parsed)))
 	(setf (imap-mailboxes ctx) mailboxes)
-	(format t "mailboxes=~{~a~%~}" mailboxes)))))
+	(format t "mailboxes=~{~a~%~}" mailboxes)
+	(select-mailbox tls "INBOX")))))
+
+(defun select-mailbox (tls mbox)
+  (with-imap-context (tls ctx)
+    (let ((cmdstr (format nil "SELECT \"~a\"" mbox)))
+      (tls-write tls (make-cmd (get-next-tag! ctx) cmdstr))
+      (setf (imap-selected-mbox ctx) mbox
+	    (imap-handler ctx) #'imap-selected-mailbox))))
+
+(defun imap-selected-mailbox (tls data)
+  (with-imap-context (tls ctx)
+    (let ((parsed (parse 'response data)))
+      (let* ((selected-mbox (imap-selected-mbox ctx))
+	     (mboxes (imap-mailboxes ctx))
+	     (mbox (find selected-mbox mboxes :test #'string= :key #'mailbox-name))
+	     (nmessages (cadr (find 'exists (car parsed) :test #'equal :key #'car))))
+	(format t "mailbox ~a has ~a messages.~%" selected-mbox nmessages)
+	(setf (mailbox-message-count mbox) nmessages)
+	(fetch-all-messages tls)))))
+
+(defun fetch-all-messages (tls)
+  (with-imap-context (tls ctx)
+    (let ((cmdstr (format nil "FETCH 1 ALL")))
+      (tls-write tls (make-cmd (get-next-tag! ctx) cmdstr))
+      (setf (imap-handler ctx) #'imap-fetch))))
+
+(defun imap-fetch (tls data)
+  (format t "data='~s'~%" data)
+  (let ((parsed (parse 'response data)))
+    (format t "parsed: ~s~%" parsed)))

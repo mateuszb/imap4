@@ -339,8 +339,11 @@
      (cons (car lst)
 	   (mapcar #'cadr (cadr lst))))))
 
+(defrule flag-wildcard "\\*"
+  (:constant '*))
+
 (defrule flag-perm
-    (or flag "\\*"))
+    (or flag flag-wildcard))
 
 (defrule greeting
     (and "*" " " (or resp-cond-auth resp-cond-bye) crlf)
@@ -372,6 +375,9 @@
 (defrule mailbox
     (or "INBOX" astring))
 
+(defrule lit-exists "EXISTS" (:constant 'exists))
+(defrule lit-recent "RECENT" (:constant 'recent))
+
 (defrule mailbox-data
     (or
      (and "FLAGS" " " flag-list)
@@ -379,16 +385,22 @@
      (and "LSUB" " " mailbox-list)
      (and "SEARCH" " " (* (and " " nz-number)))
      (and "STATUS" " " mailbox " " "(" (? status-att-list) ")")
-     (and number " " "EXISTS")
-     (and number " " "RECENT"))
+     (and number " " lit-exists)
+     (and number " " lit-recent))
   (:destructure
-   (a sp b)
+   (a sp b &optional c)
    (declare (ignore sp))
    (cond
      ((numberp a)
-      (list (intern b) a))
+      (list b a))
      (t
-      (list (intern a) b)))))
+      (let ((sym (intern a)))
+	(case sym
+	  (flags b)
+	  ((lsub list) b)
+	  (search b)
+	  (status
+	   (cons b c))))))))
 
 (defrule mailbox-list
     (and "(" (? mbx-list-flags) ")"
@@ -469,10 +481,11 @@
      (* (and " " (or msg-att-dynamic msg-att-static)))
      ")")
   (:destructure
-   (lb attr attrs rb)
-   (declare (ignore lb rb))
+   (lparen attr attrs rparen)
+   (declare (ignore lparen rparen))
    (if attrs
-       (cons 'msg-attributes (cons attr (cdar attrs)))
+       (cons 'msg-attributes
+	     (cons attr (mapcar #'cddr attrs)))
        (list 'msg-attributes attr))))
 
 (defrule flags-lit "FLAGS" (:constant 'flags))
@@ -482,7 +495,7 @@
      flags-lit " " "(" (? (and flag-fetch (* (and " " flag-fetch)))) ")")
   (:destructure
    (lit sp lb lst rb)
-   (declare (ignore sp lb rb))
+   (declare (ignore lit sp lb rb))
    (destructuring-bind (a b) lst
        (if b
 	   lst
@@ -568,11 +581,11 @@
 	       (cons tag resp)))))
 
 (defrule resp-cond-auth
-    (and (or "OK" "PREAUTH")
-	 " " resp-text)
-  (:destructure (type space text)
-		(declare (ignore space))
-		(list (intern type) text)))
+    (and (or "OK" "PREAUTH") " " resp-text)
+  (:destructure
+   (type space text)
+   (declare (ignore space))
+   (list (intern type) text)))
 
 (defrule resp-cond-bye
     (and "BYE " resp-text))
@@ -630,12 +643,15 @@
    (list 'unseen num)))
 
 (defrule resp-perm-flags
-    (and "PERMANENTFLAGS ("
+    (and "PERMANENTFLAGS" " " "("
 	 (? (and flag-perm (* (and " " flag-perm)))) ")")
   (:destructure
-   (lit lst)
-   (declare (ignore lit))
-   (list 'permanentflags lst)))
+   (lit sp lparen lst rparen)
+   (declare (ignore lit sp lparen rparen))
+   (destructuring-bind (head &rest tail) lst
+     (if tail
+	 (cons 'permanentflags (cons head (mapcar #'cadr (car tail))))
+	 (cons 'permanentflags (cons head nil))))))
 
 (defrule resp-alert "ALERT" (:constant 'alert))
 

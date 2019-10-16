@@ -313,14 +313,12 @@
      flag-keyword
      flag-extension)
   (:lambda (arg)
-    (format t "arg=~a,type=~a~%" arg (type-of arg))
     (etypecase arg
       (string (intern (string-upcase (subseq arg 1))))
       (symbol arg))))
 
 (defrule flag-extension (and #\\ atom)
-  (:destructure
-   (p a)
+  (:destructure (p a)
    (declare (ignore p))
    a))
 
@@ -357,7 +355,11 @@
     (and "(" header-fld-name (* (and " " header-fld-name)) ")"))
 
 (defrule list
-    (and "LIST" " " mailbox " " list-mailbox))
+    (and "LIST" " " mailbox " " list-mailbox)
+  (:destructure
+   (literal sp1 mailbox sp2 list-mailbox)
+   (declare (ignore sp1 sp2 literal))
+   (list mailbox list-mailbox)))
 
 (defrule list-mailbox (or (+ list-char) string))
 
@@ -390,7 +392,11 @@
 
 (defrule mailbox-list
     (and "(" (? mbx-list-flags) ")"
-	 " " (or quoted-string null) " " mailbox))
+	 " " (or quoted-string null) " " mailbox)
+  (:destructure
+   (lparen opt-list rparen sp1 opt-str sp2 mbox)
+   (declare (ignore lparen rparen sp1 sp2))
+   (list 'mailbox-list opt-list opt-str mbox)))
 
 (defrule mbx-list-flags
     (or
@@ -398,13 +404,34 @@
 	  mbx-list-sflag
 	  (* (and " " mbx-list-oflag)))
      (and mbx-list-oflag
-	  (* (and " " mbx-list-oflag)))))
+	  (* (and " " mbx-list-oflag))))
+  (:lambda (arg)
+    (let ((len (length arg)))
+      (cond
+	((= len 2)
+	 (destructuring-bind (oflag lst) arg
+	   (cons oflag
+		 (loop for elem in (cdar lst) by #'cddr
+		    when elem collect elem))))
+	((= len 3)
+	 (destructuring-bind (lst1 sflag lst2) arg
+	   (let ((result '()))
+	     (when lst1 (setf result (append result lst1)))
+	     (setf result (append result (list sflag)))
+	     (when lst2 (setf result (append result lst2)))
+	     result)))))))
 
 (defrule mbx-list-oflag
-    (or "\\Noinferiors" flag-extension))
+    (or "\\Noinferiors" flag-extension)
+  (:lambda (arg)
+    (etypecase arg
+      (string (intern (string-upcase (subseq arg 1))))
+      (symbol arg))))
 
 (defrule mbx-list-sflag
-    (or "\\Noselect" "\\Marked" "\\Unmarked"))
+    (or "\\Noselect" "\\Marked" "\\Unmarked")
+  (:lambda (arg)
+    (intern (string-upcase (subseq arg 1)))))
 
 (defrule media-basic
     (and
@@ -444,7 +471,6 @@
   (:destructure
    (lb attr attrs rb)
    (declare (ignore lb rb))
-   (format t "attr=~a, attrs=~a~%" attr attrs)
    (if attrs
        (cons 'msg-attributes (cons attr (cdar attrs)))
        (list 'msg-attributes attr))))
@@ -457,7 +483,6 @@
   (:destructure
    (lit sp lb lst rb)
    (declare (ignore sp lb rb))
-   (format t "literal=~a,list=~a~%" lit lst)
    (destructuring-bind (a b) lst
        (if b
 	   lst
@@ -500,9 +525,16 @@
     (and (* (or continue-req response-data)) response-done)
   (:destructure
    (cont-or-data resp-done)
-   (if cont-or-data
-       (list (car cont-or-data) (list 'done resp-done))
-       (list 'done resp-done))))
+
+   (cond
+     ;; continuation...
+     ((eq (car cont-or-data) 'continue)
+      (list '(continue) (list 'done resp-done)))
+     ;; response-data if present
+     (t
+      (if cont-or-data
+	  (list cont-or-data (list 'done resp-done))
+	  (list 'done resp-done))))))
 
 (defrule response-data
     (and "* " (or resp-cond-state
@@ -514,7 +546,7 @@
   (:destructure
    (lit other crlf)
    (declare (ignore lit crlf))
-   (list 'data other)))
+   other))
 
 (defrule response-done
     (or response-tagged response-fatal))
@@ -627,8 +659,6 @@
 	resp-unseen
 	resp-atom-text)
   (:lambda (arg)
-    (format t "type:~a~%" (type-of arg))
-    (format t "arg:~a~%" arg)
    arg))
 
 (defrule search

@@ -124,7 +124,6 @@
   (let* ((ctx (tls::data tls))
 	 (caps (parse 'response data)))
     (let ((data (cadadr (assoc 'data caps))))
-      (format t "data: ~a~%" data)
       (imap-authenticate tls))))
 
 (defun imap-authenticate (tls)
@@ -146,7 +145,6 @@
 (defun imap-read-auth (tls data)
   (let ((parsed (parse 'response data))
 	(ctx (tls::data tls)))
-    (format t "auth response handler: ~a~%" parsed)
     (list-hierarchy-delimeter tls)))
 
 (defun list-hierarchy-delimeter (tls)
@@ -186,7 +184,6 @@
 
 (defun imap-read-inbox-list (tls data)
   (with-imap-context (tls ctx)
-    (format t "data=~s~%" data)
     (let* ((parsed (parse 'response data)))
       (let ((mailboxes (get-mailboxes parsed)))
 	(setf (imap-mailboxes ctx) mailboxes)
@@ -211,11 +208,46 @@
 	(setf (mailbox-message-count mbox) nmessages)
 	(fetch-all-messages tls)))))
 
+(defun make-fetch-fun (tls completion)
+  (with-imap-context (tls ctx)
+    (let* ((mbox-name (imap-selected-mbox ctx))
+	   (mbox (find mbox-name (imap-mailboxes ctx) :test #'string= :key #'mailbox-name))
+	   (n (mailbox-message-count mbox))
+	   (i 1))
+      (lambda (tls-arg data-arg)
+	(cond
+	  ((= i n) (funcall completion tls))
+	  ((< i n)
+	   (incf i)
+	   (let ((parsed (parse 'response data-arg))
+		 (cmdstr (format nil "FETCH ~d ALL" i)))
+	     (let* ((lst (cdr (assoc 'msg-data (car parsed))))
+		    (attrs (getf lst :attributes))
+		    (envelope (assoc 'envelope (cdr attrs)))
+		    (subject (getf (cdr envelope) :subject))
+		    (from (cdar (getf (cdr envelope) :from))))
+	       (when (and from subject)
+		 (destructuring-bind (name adl user host) from
+		   (format t "~a@~a: ~a~%" user host subject))))
+	     (format t "fetching message ~a/~a~%" i n)
+	     (tls-write tls-arg (make-cmd (get-next-tag! ctx) cmdstr)))))))))
+
 (defun fetch-all-messages (tls)
   (with-imap-context (tls ctx)
     (let ((cmdstr (format nil "FETCH 1 ALL")))
+      (format t "fetching message 1~%")
       (tls-write tls (make-cmd (get-next-tag! ctx) cmdstr))
-      (setf (imap-handler ctx) #'imap-fetch))))
+      (setf (imap-handler ctx) (make-fetch-fun tls #'imap-done-fetching))
+      ;(setf (imap-handler ctx) #'imap-fetch)
+      )))
+
+(defun imap-done-fetching (tls)
+  (with-imap-context (tls ctx)
+    (format t "done fetching?~%")
+    (setf (imap-handler ctx) #'imap-idle)))
+
+(defun imap-idle (tls data)
+  (format t "data arrived: ~s" data))
 
 (defun imap-fetch (tls data)
   (format t "data='~s'~%" data)

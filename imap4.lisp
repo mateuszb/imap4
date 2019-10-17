@@ -4,6 +4,8 @@
 
 (require :esrap)
 
+(declaim (optimize (debug 3) (speed 0)))
+
 (defvar *literal-length*)
 
 (defun not-doublequote (c)
@@ -64,9 +66,9 @@
 
 (defrule crlf (and #\return #+off #\newline))
 
-(defrule literal-string-length (and #\{ number #\})
-  (:destructure (lb num rb)
-		(declare (ignore lb rb))
+(defrule literal-string-length (and #\{ number #\} crlf)
+  (:destructure (lb num rb crlf)
+		(declare (ignore lb rb crlf))
 		num))
 
 (defun parse-literal-string (text position end)
@@ -157,7 +159,7 @@
 
 (defrule body-type-1part
     (and
-     (or body-type-base body-type-msg body-type-text)
+     (or body-type-basic body-type-msg body-type-text)
      (? (and #\space body-ext-1part))))
 
 (defrule body-type-basic (and media-basic #\space body-fields))
@@ -198,11 +200,16 @@
    (declare (ignorable caps2 imap4cap cap))
    (list 'capabilities (mapcar #'cadr caps1))))
 
-(defrule null "NIL")
-(defrule nstring (or string null))
+(defrule null "NIL" (:constant nil))
+
+(defrule nstring (or null string))
 
 (defrule address
-    (and #\( addr-name #\space addr-adl #\space addr-mailbox #\space addr-host #\)))
+    (and "(" addr-name " " addr-adl " " addr-mailbox " " addr-host ")")
+  (:destructure
+   (lparen name sp1 adl sp2 mbox sp3 host rparen)
+   (declare (ignore lparen rparen sp1 sp2 sp3))
+   (list 'address name adl mbox host)))
 
 (defrule addr-adl nstring)
 (defrule addr-host nstring)
@@ -251,22 +258,61 @@
 (defrule create (and "CREATE" " " mailbox))
 (defrule date (or date-text (and #\" date-text #\")))
 (defrule date-day (and digit digit))
-(defrule date-day-fixed (or (and " " digit) (and digit digit)))
+(defrule date-day-fixed (and (or " " digit) digit)
+  (:lambda (arg)
+    (parse-integer (text arg) :radix 10)))
+
 (defrule date-month
     (or "Jan" "Feb" "Mar" "Apr" "May" "Jun"
-	"Jul" "Aug" "Sep" "Oct" "Nov" "Dec"))
+	"Jul" "Aug" "Sep" "Oct" "Nov" "Dec")
+  (:lambda (arg)
+    (cond
+      ((string= arg "Jan") 1)
+      ((string= arg "Feb") 2)
+      ((string= arg "Mar") 3)
+      ((string= arg "Apr") 4)
+      ((string= arg "May") 5)
+      ((string= arg "Jun") 6)
+      ((string= arg "Jul") 7)
+      ((string= arg "Aug") 8)
+      ((string= arg "Sep") 9)
+      ((string= arg "Oct") 10)
+      ((string= arg "Nov") 11)
+      ((string= arg "Dec") 12))))
 
 (defrule date-text (and date-day "-" date-month "-" date-year))
-(defrule date-year (and digit digit digit digit))
+
+(defrule date-year (and digit digit digit digit)
+  (:lambda (arg)
+    (parse-integer (text arg) :radix 10)))
 
 (defrule date-time
-    (and #\" date-day-fixed "-" date-month "-" date-year
-	 #\" time " " zone #\"))
+    (and #\" date-day-fixed "-" date-month "-" date-year " " time " " zone #\")
+  (:destructure
+   (lquote date-day-fixed sep1 month sep2 year sep3 time sep4 zone rquote)
+   (declare (ignore lquote rquote sep1 sep2 sep3 sep4))
+   (list 'date-time date-day-fixed month year time zone)))
 
 (defrule delete (and "DELETE" " " mailbox))
 
+#|
+ENVELOPE 
+(
+"Sun, 12 Jun 2011 20:27:24 +0200"   <--- date
+"Alior Bank S.A. Potwierdzenie wykonania transakcji" <--- subject
+((NIL NIL \"powiadomienia\" \"alior.pl\")) <--- from
+((NIL NIL \"powiadomienia\" \"alior.pl\")) <--- sender
+((NIL NIL \"powiadomienia\" \"alior.pl\")) <--- reply-to
+((NIL NIL \"mateuszb\" \"fastmail.fm\")) <--- to
+NIL <--- CC
+NIL <--- BCC
+NIL <--- in-reply-to
+"<714734217.29851307903244929.JavaMail.mwapp@mwapp203>"
+)
+|#
 (defrule envelope
-    (and "(" env-date " "
+    (and "("
+	 env-date " "
 	 env-subject " "
 	 env-from " "
 	 env-sender " "
@@ -275,33 +321,85 @@
 	 env-cc " "
 	 env-bcc " "
 	 env-in-reply-to " "
-	 env-message-id ")"))
+	 env-message-id
+	 ")")
+  (:destructure
+   (lparen date sp2 subject sp3 from sp4 sender sp5 reply-to sp6 to sp7 cc sp8 bcc sp9 in-reply-to sp10 msg-id rparen)
+   (declare (ignore lparen rparen sp2 sp3 sp4 sp5 sp6 sp7 sp8 sp9 sp10))
+   (list 'envelope
+	 :date date
+	 :subject subject
+	 :from from
+	 :sender sender
+	 :reply-to reply-to
+	 :to to
+	 :cc cc
+	 :bcc bcc
+	 :in-reply-to in-reply-to
+	 :msg-id msg-id)))
 
 (defrule env-bcc (or (and "(" (+ address) ")") null))
 (defrule env-cc (or (and "(" (+ address) ")") null))
 (defrule env-date nstring)
-(defrule env-from (or (and "(" (+ address) ")") null))
+(defrule env-from (or (and "(" (+ address) ")") null)
+  (:lambda (arg)
+    (if (consp arg)
+	(destructuring-bind (lparen addr-lst rparen) arg
+	  (declare (ignore lparen rparen))
+	  addr-lst)
+	arg)))
+
 (defrule env-in-reply-to nstring)
 (defrule env-message-id nstring)
-(defrule env-reply-to (or (and "(" (+ address) ")") null))
-(defrule env-sender (or (and "(" (+ address) ")") null))
+
+(defrule env-reply-to (or null (and "(" (+ address) ")"))
+  (:lambda (arg)
+    (if arg
+	(destructuring-bind (lparen addrlst rparen) arg
+	  (declare (ignore lparen rparen))
+	  addrlst)
+	nil)))
+
+(defrule env-sender (or null (and "(" (+ address) ")"))
+  (:lambda (arg)
+    (if arg
+	(destructuring-bind (lparen addrlst rparen) arg
+	  (declare (ignore lparen rparen))
+	  addrlst)
+	nil)))
+
 (defrule env-subject nstring)
-(defrule env-to (or (and "(" (+ address) ")") null))
+
+(defrule env-to (or null (and "(" (+ address) ")"))
+  (:lambda (arg)
+    (if arg
+	(destructuring-bind (lparen addrlst rparen) arg
+	  (declare (ignore lparen rparen))
+	  addrlst)
+	nil)))
+
 (defrule examine (and "EXAMINE" " " mailbox))
+
 (defrule fetch
     (and "FETCH" " " sequence-set " "
 	 (or "ALL" "FULL" "FAST" fetch-att (and "(" fetch-att (* (and " " fetch-att)) ")"))))
 
 (defrule envelope-lit "ENVELOPE" (:constant 'envelope))
+(defrule internaldate-lit "INTERNALDATE" (:constant 'internaldate))
+(defrule rfc822-lit "RFC822" (:constant 'rfc822))
+(defrule body-lit "BODY" (:constant 'body))
+(defrule bodypeek-lit "BODY.PEEK" (:constant 'body.peek))
+(defrule uid-lit "UID" (:constant 'uid))
+
 (defrule fetch-att
     (or envelope-lit
 	flags-lit
-	"INTERNALDATE"
-	(and "RFC822" (? (or ".HEADER" ".SIZE" ".TEXT")))
-	(and "BODY" (? "STRUCTURE"))
-	"UID"
-	(and "BODY" section (? (and "<" number "." nz-number ">")))
-	(and "BODY.PEEK" section (? (and "<" number "." nz-number ">")))))
+	internaldate-lit
+	(and rfc822-lit (? (or ".HEADER" ".SIZE" ".TEXT")))
+	(and body-lit (? "STRUCTURE"))
+	uid-lit
+	(and body-lit section (? (and "<" number "." nz-number ">")))
+	(and bodypeek-lit section (? (and "<" number "." nz-number ">")))))
 
 (defrule flag
     (or
@@ -378,29 +476,30 @@
 (defrule lit-exists "EXISTS" (:constant 'exists))
 (defrule lit-recent "RECENT" (:constant 'recent))
 
+(defrule list-lit "LIST" (:constant 'list))
+(defrule lsub-lit "LSUB" (:constant 'lsub))
+(defrule search-lit "SEARCH" (:constant 'search))
+(defrule status-lit "STATUS" (:constant 'status))
+
 (defrule mailbox-data
     (or
-     (and "FLAGS" " " flag-list)
-     (and "LIST" " " mailbox-list)
-     (and "LSUB" " " mailbox-list)
-     (and "SEARCH" " " (* (and " " nz-number)))
-     (and "STATUS" " " mailbox " " "(" (? status-att-list) ")")
+     (and flags-lit " " flag-list)
+     (and list-lit " " mailbox-list)
+     (and lsub-lit " " mailbox-list)
+     (and search-lit " " (* (and " " nz-number)))
+     (and status-lit " " mailbox " " "(" (? status-att-list) ")")
      (and number " " lit-exists)
      (and number " " lit-recent))
   (:destructure
    (a sp b &optional c)
    (declare (ignore sp))
    (cond
-     ((numberp a)
-      (list b a))
+     ((numberp a) (list b a))
      (t
-      (let ((sym (intern a)))
-	(case sym
-	  (flags b)
-	  ((lsub list) b)
-	  (search b)
-	  (status
-	   (cons b c))))))))
+      (case a
+	((lsub list search flags) b)
+	(status
+	 (cons b c)))))))
 
 (defrule mailbox-list
     (and "(" (? mbx-list-flags) ")"
@@ -453,7 +552,7 @@
      " " media-subtype))
 
 (defrule media-message
-    (and #\" "MESSAGE" #\" " " #\" "RFC822" #\"))
+    (and #\" "MESSAGE" #\" " " #\" rfc822-lit #\"))
 
 (defrule media-subtype string)
 
@@ -464,15 +563,16 @@
 
 (defrule message-data
     (and nz-number " " (or expunge-lit (and fetch-lit " " msg-att)))
-  (:destructure (num sp lst)
-		(declare (ignore sp))
-		(case lst
-		  (expunge
-		   (list 'msg-data num lst))
-		  (t
-		   (list 'msg-data (cons
-				    (car lst)
-				    (cddr lst)))))))
+  (:destructure
+   (num sp lst)
+   (declare (ignore sp))
+   (case lst
+     (expunge (list 'msg-data num lst))
+     (t
+      (destructuring-bind (lit sp msg-att) lst
+	(list 'msg-data
+	      :number num
+	      :attributes msg-att))))))
 
 (defrule msg-att
     (and
@@ -485,8 +585,9 @@
    (declare (ignore lparen rparen))
    (if attrs
        (cons 'msg-attributes
-	     (cons attr (mapcar #'cddr attrs)))
-       (list 'msg-attributes attr))))
+	     (cons attr (mapcar #'cadr attrs)))
+       (cons 'msg-attributes
+	     (cons attr nil)))))
 
 (defrule flags-lit "FLAGS" (:constant 'flags))
 
@@ -494,40 +595,61 @@
     (and
      flags-lit " " "(" (? (and flag-fetch (* (and " " flag-fetch)))) ")")
   (:destructure
-   (lit sp lb lst rb)
-   (declare (ignore lit sp lb rb))
+   (lit sp lparen lst rparen)
+   (declare (ignore lit sp lparen rparen))
    (destructuring-bind (a b) lst
-       (if b
-	   lst
-	   a))))
+     (if b
+	 (cons 'dynamic-attributes (cons a (mapcar #'cadr b)))
+	 (cons 'dynamic-attributes (cons a nil))))))
 
 (defrule msg-att-envelope
-    (and "ENVELOPE" " " envelope)
+    (and envelope-lit " " envelope)
   (:destructure
    (lit sp env)
    (declare (ignore lit sp))
-   (list 'envelope env)))
+   env))
 
 (defrule msg-att-internaldate
-    (and "INTERNALDATE" " " date-time)
+    (and internaldate-lit " " date-time)
   (:destructure (lit sp date-time)
 		(declare (ignore lit sp))
 		(list 'internaldate date-time)))
 
 (defrule msg-att-uid
-    (and "UID" " " uniqueid)
+    (and uid-lit " " uniqueid)
   (:destructure (lit sp id)
 		(declare (ignore lit sp))
 		(list 'uid id)))
+
+(defrule rfc822.size-lit "RFC822.SIZE" (:constant 'rfc822.size))
+(defrule rfc822.header-lit ".HEADER" (:constant 'header))
+(defrule rfc822.text-lit ".TEXT" (:constant 'text))
+(defrule rfc822.component-lit (or rfc822.header-lit rfc822.text-lit))
+
+(defrule rfc822-hdr-or-text
+    (and rfc822.size-lit (? rfc822.component-lit) " " nstring)
+  (:destructure
+   (lit component? sp nstr)
+   (declare (ignore sp))
+   (if component?
+       (list lit component? nstr)
+       (list lit nstr))))
+
+(defrule rfc822.size (and rfc822.size-lit " " number)
+  (:destructure
+   (lit sp num)
+   (declare (ignore sp))
+   (list lit num)))
 
 (defrule msg-att-static
     (or
      msg-att-envelope
      msg-att-internaldate
-     (and "RFC822" (? (or ".HEADER" ".TEXT")) " " nstring)
-     (and "RFC822.SIZE" " " number)
-     (and "BODY" (? "STRUCTURE") " " body)
-     (and "BODY" section (? (and "<" number ">")) " " nstring)
+     (and rfc822-lit (? (or ".HEADER" ".TEXT")) " " nstring)
+     rfc822.size
+     ;(and rfc822.size-lit " " number)
+     (and body-lit (? "STRUCTURE") " " body)
+     (and body-lit section (? (and "<" number ">")) " " nstring)
      msg-att-uid))
 
 (defrule password astring)
@@ -768,7 +890,14 @@
 
 (defrule text-char (+ (not-crlf-p character)))
 
-(defrule time (and digit digit ":" digit digit ":" digit digit))
+(defrule time (and (and digit digit) ":" (and digit digit) ":" (and digit digit))
+  (:destructure
+   (hour sep1 min sep2 sec)
+   (declare (ignore sep1 sep2))
+   (list 'time
+	 (parse-integer (text hour))
+	 (parse-integer (text min))
+	 (parse-integer (text sec)))))
 
 (defrule uid (and "UID " (or copy fetch search store)))
 (defrule uniqueid nz-number)
@@ -777,7 +906,12 @@
 
 (defrule x-command (and "X" atom))
 
-(defrule zone (and (or "+" "-") digit digit digit digit))
+(defrule zone (and (or "+" "-") (and digit digit) (and digit digit))
+  (:destructure
+   (sign h m)
+   (let ((tzsign (if (string= sign "+") '+ '-)))
+     (list 'timezone tzsign (parse-integer (text h) :radix 10)
+	   (parse-integer (text m) :radix 10)))))
 
 (defun make-response-string (str)
   (format nil "~a~a~a" str #\return #\newline))
